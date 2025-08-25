@@ -1,26 +1,26 @@
-"""Enhanced diff parser that includes Java function information."""
+"""Enhanced diff parser that includes Python function information."""
 
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict
 from pathlib import Path
 
 from diff_parser import FileChange, DiffHunk, parse_diff_output
-from java_function_detector import JavaFunction, JavaFunctionDetector
+from python_function_detector import PythonFunction, PythonFunctionDetector
 
 
 @dataclass
 class FunctionChange:
-    """Represents a change within a specific Java function."""
-    function: JavaFunction
+    """Represents a change within a specific Python function."""
+    function: PythonFunction
     change_type: str  # 'modified', 'added', 'deleted'
     affected_lines: List[int] = field(default_factory=list)
 
 
 @dataclass
 class EnhancedFileChange:
-    """Enhanced FileChange that includes function-level information for Java files."""
+    """Enhanced FileChange that includes function-level information for Python files."""
     original_change: FileChange
-    detected_functions: List[JavaFunction] = field(default_factory=list)
+    detected_functions: List[PythonFunction] = field(default_factory=list)
     function_changes: List[FunctionChange] = field(default_factory=list)
     
     @property
@@ -28,8 +28,8 @@ class EnhancedFileChange:
         return self.original_change.new_file
     
     @property
-    def is_java_file(self) -> bool:
-        return self.file_path.endswith('.java')
+    def is_python_file(self) -> bool:
+        return self.file_path.endswith('.py')
     
     @property
     def hunks(self) -> List[DiffHunk]:
@@ -37,14 +37,14 @@ class EnhancedFileChange:
 
 
 class FunctionAwareDiffParser:
-    """Parser that combines git diff information with Java function detection."""
+    """Parser that combines git diff information with Python function detection."""
     
     def __init__(self):
-        self.function_detector = JavaFunctionDetector()
+        self.function_detector = PythonFunctionDetector()
     
     def parse_diff_with_functions(self, diff_text: str, repo_path: str) -> List[EnhancedFileChange]:
         """
-        Parse git diff and enhance with function information for Java files.
+        Parse git diff and enhance with function information for Python files.
         
         Args:
             diff_text: Raw git diff output
@@ -67,8 +67,8 @@ class FunctionAwareDiffParser:
         """Enhance a single FileChange with function information."""
         enhanced = EnhancedFileChange(original_change=change)
         
-        # Only process Java files
-        if not enhanced.is_java_file:
+        # Only process Python files
+        if not enhanced.is_python_file:
             return enhanced
         
         try:
@@ -84,7 +84,7 @@ class FunctionAwareDiffParser:
         
         return enhanced
     
-    def _map_hunks_to_functions(self, hunks: List[DiffHunk], functions: List[JavaFunction]) -> List[FunctionChange]:
+    def _map_hunks_to_functions(self, hunks: List[DiffHunk], functions: List[PythonFunction]) -> List[FunctionChange]:
         """Map diff hunks to the functions they affect."""
         function_changes = []
         
@@ -137,7 +137,7 @@ class FunctionAwareDiffParser:
         
         return changed_lines
     
-    def _determine_change_type(self, hunk: DiffHunk, function: JavaFunction) -> str:
+    def _determine_change_type(self, hunk: DiffHunk, function: PythonFunction) -> str:
         """Determine the type of change affecting a function."""
         has_additions = any(line.startswith('+') for line in hunk.lines)
         has_deletions = any(line.startswith('-') for line in hunk.lines)

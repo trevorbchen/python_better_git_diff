@@ -20,7 +20,7 @@ def check_imports():
     modules_to_test = [
         'git_operations',
         'diff_parser', 
-        'java_function_detector',
+        'python_function_detector',
         'function_aware_diff'
     ]
     
@@ -33,28 +33,31 @@ def check_imports():
         except Exception as e:
             print(f"  ⚠️  {module} - other error: {e}")
 
-def test_tree_sitter():
-    """Test tree-sitter Java functionality."""
-    print("\n🌳 Testing tree-sitter Java...")
+def test_python_ast():
+    """Test Python AST functionality."""
+    print("\n🌳 Testing Python AST parsing...")
     
     try:
-        import tree_sitter_java as tsjava
-        from tree_sitter import Language, Parser
+        import ast
         
-        java_language = Language(tsjava.language())
-        parser = Parser(java_language)
+        # Test parsing simple Python code
+        test_code = '''
+def test_function():
+    return "Hello World"
+
+class TestClass:
+    def method(self):
+        pass
+'''
+        tree = ast.parse(test_code)
         
-        # Test parsing simple Java code
-        test_code = 'public class Test { public void method() {} }'
-        tree = parser.parse(bytes(test_code, "utf8"))
-        
-        if tree.root_node:
-            print("  ✅ Tree-sitter Java parsing works")
+        if tree:
+            print("  ✅ Python AST parsing works")
         else:
-            print("  ❌ Tree-sitter Java parsing failed")
+            print("  ❌ Python AST parsing failed")
             
     except Exception as e:
-        print(f"  ❌ Tree-sitter Java error: {e}")
+        print(f"  ❌ Python AST error: {e}")
 
 def test_git_functionality():
     """Test GitPython functionality."""
@@ -78,24 +81,32 @@ def test_simple_functionality():
     print("\n🧪 Testing basic functionality...")
     
     try:
-        from java_function_detector import JavaFunctionDetector
+        from python_function_detector import PythonFunctionDetector
         
-        detector = JavaFunctionDetector()
-        test_java = '''
-public class Test {
-    public void simpleMethod() {
-        System.out.println("Hello");
-    }
-}
+        detector = PythonFunctionDetector()
+        test_python = '''
+class Test:
+    def simple_method(self):
+        print("Hello")
+        
+    @property
+    def value(self):
+        return 42
+
+async def async_function():
+    return "async result"
 '''
         
-        functions = detector.detect_functions(test_java)
+        functions = detector.detect_functions(test_python)
         if functions and len(functions) > 0:
-            print(f"  ✅ Java function detection works - found {len(functions)} function(s)")
+            print(f"  ✅ Python function detection works - found {len(functions)} function(s)")
             for func in functions:
-                print(f"    - {func.name} (lines {func.start_line}-{func.end_line})")
+                decorators = f" @{', @'.join(func.decorator_names)}" if func.decorator_names else ""
+                async_marker = " (async)" if func.is_async else ""
+                class_info = f" in {func.class_name}" if func.class_name else ""
+                print(f"    - {func.name}{decorators}{async_marker} (lines {func.start_line}-{func.end_line}){class_info}")
         else:
-            print("  ❌ Java function detection failed - no functions found")
+            print("  ❌ Python function detection failed - no functions found")
             
     except Exception as e:
         print(f"  ❌ Functionality test error: {e}")
@@ -115,7 +126,7 @@ def main():
     
     check_python_version()
     check_imports()
-    test_tree_sitter()
+    test_python_ast()
     test_git_functionality()
     test_simple_functionality()
     

@@ -4,9 +4,9 @@ from function_aware_diff import parse_git_diff_with_functions
 
 def main():
     """Example usage of the better git diff system."""
-    print("Better Git Diff - Java Function Detection")
+    print("Better Git Diff - Python Function Detection")
 
-    # Example: Get diff for a specific commit and analyze Java functions
+    # Example: Get diff for a specific commit and analyze Python functions
     repo_path = "sg-cdb"
     commit_sha = "979fec15253578653f5f8940a50cf7e01c77d933"
 
@@ -14,16 +14,20 @@ def main():
     enhanced_changes = parse_git_diff_with_functions(diff_text, repo_path)
 
     for change in enhanced_changes:
-        if change.is_java_file:
-            print(f"\nJava file: {change.file_path}")
+        if change.is_python_file:
+            print(f"\nPython file: {change.file_path}")
             for func_change in change.function_changes:
                 func = func_change.function
                 print(f"  {func_change.change_type.upper()}: {func.name} "
                       f"(lines {func.start_line}-{func.end_line})")
                 if func.class_name:
                     print(f"    in class {func.class_name}")
+                if func.is_async:
+                    print(f"    (async function)")
+                if func.decorator_names:
+                    print(f"    decorators: {', '.join(func.decorator_names)}")
 
-    print("Integration complete! Use the functions above to analyze Java diffs.")
+    print("Integration complete! Use the functions above to analyze Python diffs.")
 
 
 if __name__ == "__main__":
