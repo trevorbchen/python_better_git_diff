@@ -2,9 +2,13 @@
 
 import tempfile
 import os
+import sys
 from pathlib import Path
 import pytest
 from git import Repo
+
+# Add the parent directory to the path so we can import our modules
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from git_operations import clone_repository, get_commit_diff
 from diff_parser import parse_diff_output
