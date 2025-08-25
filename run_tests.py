@@ -30,8 +30,6 @@ def check_dependencies():
     
     required_modules = [
         ('git', 'GitPython'),
-        ('tree_sitter', 'tree-sitter'),
-        ('tree_sitter_java', 'tree-sitter-java'),
         ('pytest', 'pytest')
     ]
     
@@ -121,7 +119,7 @@ def run_tests_individually():
     
     test_files = [
         'tests/test_git_operations.py',
-        'tests/test_java_function_detection.py'
+        'tests/test_python_function_detection.py'
     ]
     
     results = []

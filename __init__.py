@@ -1,7 +1,7 @@
 """Better Git Diff - A library for extracting function-level diffs from git repositories."""
 
 from .git_operations import clone_repository, get_commit_diff
-from .python_function_detector import JavaFunctionDetector, JavaFunction, detect_java_functions_in_file
+from .python_function_detector import PythonFunctionDetector, PythonFunction, detect_python_functions_in_file
 from .function_aware_diff import (
     FunctionAwareDiffParser, 
     FunctionChange, 
@@ -14,9 +14,9 @@ __version__ = "0.1.0"
 __all__ = [
     "clone_repository",
     "get_commit_diff", 
-    "JavaFunctionDetector",
-    "JavaFunction",
-    "detect_java_functions_in_file",
+    "PythonFunctionDetector",
+    "PythonFunction",
+    "detect_python_functions_in_file",
     "FunctionAwareDiffParser",
     "FunctionChange", 
     "EnhancedFileChange",
