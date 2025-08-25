@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Comprehensive test runner with detailed reporting."""
+"""Windows-compatible test runner with better error handling."""
 
 import subprocess
 import sys
 import os
 import time
+import gc
 from pathlib import Path
 from datetime import datetime
+
 
 def print_header(title):
     """Print a formatted header."""
@@ -14,11 +16,13 @@ def print_header(title):
     print(f" {title}")
     print("=" * 80)
 
+
 def print_section(title):
     """Print a formatted section header."""
     print(f"\n{'─' * 60}")
     print(f" {title}")
     print("─" * 60)
+
 
 def check_dependencies():
     """Check if all required dependencies are available."""
@@ -35,124 +39,109 @@ def check_dependencies():
     for module, package in required_modules:
         try:
             __import__(module)
-            print(f"  ✅ {package} - OK")
+            print(f"   ✅ {package} - OK")
         except ImportError:
-            print(f"  ❌ {package} - MISSING")
+            print(f"   ❌ {package} - MISSING")
             missing.append(package)
     
     if missing:
         print(f"\n❌ Missing dependencies: {', '.join(missing)}")
-        print("   Run: uv add " + " ".join(missing))
         return False
     
     print("\n✅ All dependencies found!")
     return True
 
-def check_project_structure():
-    """Check if the project structure is correct."""
-    print_section("🏗️  Checking Project Structure")
-    
-    required_files = [
-        'git_operations.py',
-        'java_function_detector.py', 
-        'function_aware_diff.py',
-        'diff_parser.py',
-        'tests/test_git_operations.py',
-        'tests/test_java_function_detection.py',
-        '__init__.py'
-    ]
-    
-    project_root = Path(__file__).parent.absolute()
-    missing = []
-    
-    for file in required_files:
-        file_path = project_root / file
-        if file_path.exists():
-            print(f"  ✅ {file} - Found")
-        else:
-            print(f"  ❌ {file} - Missing")
-            missing.append(file)
-    
-    if missing:
-        print(f"\n❌ Missing files: {', '.join(missing)}")
-        return False
-    
-    print("\n✅ Project structure looks good!")
-    return True
 
-def run_individual_tests():
-    """Run tests individually with detailed output."""
-    print_section("🧪 Running Individual Test Files")
-    
-    project_root = Path(__file__).parent.absolute()
+def run_individual_test(test_file, project_root):
+    """Run a single test file with better error handling."""
+    print(f"\n🔄 Running {test_file}...")
+    print("─" * 40)
     
     # Setup environment
     env = os.environ.copy()
     env['PYTHONPATH'] = str(project_root)
+    
+    cmd = [
+        sys.executable, '-m', 'pytest',
+        test_file,
+        '-v', '--tb=short', '--no-header',
+        '-x',  # Stop on first failure for easier debugging
+        '--disable-warnings'  # Reduce noise
+    ]
+    
+    start_time = time.time()
+    try:
+        result = subprocess.run(
+            cmd, 
+            env=env, 
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=120  # Longer timeout for Windows
+        )
+        
+        duration = time.time() - start_time
+        
+        if result.returncode == 0:
+            print(f"   ✅ {test_file} - PASSED ({duration:.2f}s)")
+            return True
+        else:
+            print(f"   ❌ {test_file} - FAILED ({duration:.2f}s)")
+            
+            # Show relevant output
+            if result.stdout:
+                print("   📝 Output:")
+                lines = result.stdout.strip().split('\n')
+                for line in lines[-15:]:  # Show last 15 lines
+                    if line.strip() and not line.startswith('='):
+                        print(f"      {line}")
+            
+            if result.stderr:
+                print("   🔥 Errors:")
+                lines = result.stderr.strip().split('\n')
+                for line in lines[:10]:  # Show first 10 error lines
+                    if line.strip():
+                        print(f"      {line}")
+            
+            return False
+                    
+    except subprocess.TimeoutExpired:
+        print(f"   ⏰ {test_file} - TIMEOUT (120s)")
+        return False
+    except Exception as e:
+        print(f"   💥 {test_file} - ERROR: {e}")
+        return False
+
+
+def run_tests_individually():
+    """Run tests one by one for better debugging."""
+    print_section("🧪 Running Tests Individually")
+    
+    project_root = Path(__file__).parent.absolute()
     
     test_files = [
         'tests/test_git_operations.py',
         'tests/test_java_function_detection.py'
     ]
     
-    results = {}
+    results = []
     
     for test_file in test_files:
-        print(f"\n🔄 Running {test_file}...")
-        print("─" * 40)
+        # Force garbage collection between tests to help with cleanup
+        gc.collect()
         
-        cmd = [
-            sys.executable, '-m', 'pytest',
-            test_file,
-            '-v', '--tb=short', '--no-header'
-        ]
+        success = run_individual_test(test_file, project_root)
+        results.append((test_file, success))
         
-        start_time = time.time()
-        try:
-            result = subprocess.run(
-                cmd, 
-                env=env, 
-                cwd=project_root,
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-            
-            duration = time.time() - start_time
-            
-            if result.returncode == 0:
-                print(f"  ✅ {test_file} - PASSED ({duration:.2f}s)")
-                results[test_file] = {'status': 'PASSED', 'duration': duration, 'output': result.stdout}
-            else:
-                print(f"  ❌ {test_file} - FAILED ({duration:.2f}s)")
-                results[test_file] = {'status': 'FAILED', 'duration': duration, 'output': result.stdout, 'errors': result.stderr}
-            
-            # Show some output
-            if result.stdout:
-                lines = result.stdout.strip().split('\n')
-                for line in lines[-10:]:  # Show last 10 lines
-                    if line.strip():
-                        print(f"     {line}")
-            
-            if result.stderr and result.returncode != 0:
-                print("  📝 Error details:")
-                lines = result.stderr.strip().split('\n')
-                for line in lines[:5]:  # Show first 5 error lines
-                    if line.strip():
-                        print(f"     {line}")
-                        
-        except subprocess.TimeoutExpired:
-            print(f"  ⏰ {test_file} - TIMEOUT (60s)")
-            results[test_file] = {'status': 'TIMEOUT', 'duration': 60}
-        except Exception as e:
-            print(f"  💥 {test_file} - ERROR: {e}")
-            results[test_file] = {'status': 'ERROR', 'error': str(e)}
+        # Small delay to help with file cleanup on Windows
+        time.sleep(0.5)
     
     return results
 
-def run_full_test_suite():
-    """Run the complete test suite."""
-    print_section("🎯 Running Complete Test Suite")
+
+def run_specific_test_method(test_method):
+    """Run a specific test method."""
+    print_section(f"🎯 Running Specific Test: {test_method}")
     
     project_root = Path(__file__).parent.absolute()
     
@@ -162,71 +151,22 @@ def run_full_test_suite():
     
     cmd = [
         sys.executable, '-m', 'pytest',
-        'tests/',
+        test_method,
         '-v', '--tb=short',
-        '--durations=10',  # Show 10 slowest tests
-        '--color=yes'
+        '--disable-warnings'
     ]
-    
-    print(f"🚀 Command: {' '.join(cmd)}")
-    print(f"📁 Working directory: {project_root}")
-    print(f"🐍 Python path: {env['PYTHONPATH']}")
-    
-    start_time = time.time()
     
     try:
         result = subprocess.run(cmd, env=env, cwd=project_root, text=True)
-        duration = time.time() - start_time
-        
-        if result.returncode == 0:
-            print(f"\n🎉 ALL TESTS PASSED! ({duration:.2f}s total)")
-        else:
-            print(f"\n💥 SOME TESTS FAILED! ({duration:.2f}s total)")
-            print(f"   Exit code: {result.returncode}")
-        
         return result.returncode == 0
-        
     except Exception as e:
-        print(f"\n💥 Error running full test suite: {e}")
+        print(f"Error running specific test: {e}")
         return False
 
-def print_summary(individual_results, full_suite_passed):
-    """Print a comprehensive test summary."""
-    print_header("📊 TEST SUMMARY")
-    
-    # Individual test results
-    print("🧪 Individual Test Results:")
-    passed = 0
-    failed = 0
-    
-    for test_file, result in individual_results.items():
-        status = result['status']
-        duration = result.get('duration', 0)
-        
-        if status == 'PASSED':
-            print(f"  ✅ {test_file} - {status} ({duration:.2f}s)")
-            passed += 1
-        else:
-            print(f"  ❌ {test_file} - {status} ({duration:.2f}s)")
-            failed += 1
-    
-    print(f"\n📈 Results: {passed} passed, {failed} failed")
-    
-    # Full suite result
-    print(f"\n🎯 Full Test Suite: {'✅ PASSED' if full_suite_passed else '❌ FAILED'}")
-    
-    # Overall status
-    print(f"\n🏆 Overall Status: ", end="")
-    if passed > 0 and failed == 0 and full_suite_passed:
-        print("🎉 ALL SYSTEMS GO!")
-    elif passed > 0:
-        print("⚠️  PARTIALLY WORKING")
-    else:
-        print("💥 NEEDS ATTENTION")
 
 def main():
     """Main test runner function."""
-    print_header("🧪 Better Git Diff - Comprehensive Test Runner")
+    print_header("🧪 Better Git Diff - Windows Test Runner")
     print(f"🕐 Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Change to project directory
@@ -239,36 +179,42 @@ def main():
             print("\n❌ Please install missing dependencies first!")
             sys.exit(1)
         
-        # Step 2: Check project structure
-        if not check_project_structure():
-            print("\n❌ Please fix project structure first!")
-            sys.exit(1)
+        # Step 2: Run individual tests
+        results = run_tests_individually()
         
-        # Step 3: Run individual tests
-        individual_results = run_individual_tests()
+        # Step 3: Print summary
+        print_section("📊 TEST SUMMARY")
         
-        # Step 4: Run full test suite
-        full_suite_passed = run_full_test_suite()
+        passed = sum(1 for _, success in results if success)
+        failed = len(results) - passed
         
-        # Step 5: Print summary
-        print_summary(individual_results, full_suite_passed)
+        print(f"🧪 Test Results:")
+        for test_file, success in results:
+            status = "✅ PASSED" if success else "❌ FAILED"
+            print(f"   {status} - {test_file}")
         
-        # Exit with appropriate code
-        if full_suite_passed and all(r['status'] == 'PASSED' for r in individual_results.values()):
-            print(f"\n🎯 Test run completed successfully!")
-            sys.exit(0)
+        print(f"\n📈 Summary: {passed} passed, {failed} failed")
+        
+        if failed == 0:
+            print("🎉 ALL TESTS PASSED!")
+            print("\nYou can now run the full test suite with:")
+            print("python -m pytest tests/ -v")
         else:
-            print(f"\n⚠️  Test run completed with issues.")
-            sys.exit(1)
+            print("⚠️   Some tests failed. Check the output above for details.")
+            print("\nTo run a specific test:")
+            print("python -m pytest tests/test_git_operations.py::test_parse_diff_output -v")
+        
+        sys.exit(0 if failed == 0 else 1)
             
     except KeyboardInterrupt:
-        print("\n\n⏹️  Tests interrupted by user")
+        print("\n\n⏹️   Tests interrupted by user")
         sys.exit(1)
     except Exception as e:
         print(f"\n💥 Unexpected error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
 
 if __name__ == '__main__':
     main()

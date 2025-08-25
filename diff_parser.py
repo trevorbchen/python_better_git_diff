@@ -1,134 +1,170 @@
-"""Parser for git diff output to extract file changes."""
+"""Enhanced diff parser that includes Python function information."""
 
-import re
-from dataclasses import dataclass
-from typing import List, Dict, Tuple
+from dataclasses import dataclass, field
+from typing import List, Optional, Dict
+from pathlib import Path
+
+from diff_parser import FileChange, DiffHunk, parse_diff_output
+from python_function_detector import PythonFunction, PythonFunctionDetector
 
 
 @dataclass
-class FileChange:
-    """Represents a file change in a git diff."""
-    old_file: str
-    new_file: str
-    old_mode: str
-    new_mode: str
-    is_new_file: bool
-    is_deleted_file: bool
-    hunks: List['DiffHunk']
+class FunctionChange:
+    """Represents a change within a specific Python function."""
+    function: PythonFunction
+    change_type: str  # 'modified', 'added', 'deleted'
+    affected_lines: List[int] = field(default_factory=list)
 
 
-@dataclass  
-class DiffHunk:
-    """Represents a hunk of changes in a file."""
-    old_start: int
-    old_count: int
-    new_start: int
-    new_count: int
-    lines: List[str]
+@dataclass
+class EnhancedFileChange:
+    """Enhanced FileChange that includes function-level information for Python files."""
+    original_change: FileChange
+    detected_functions: List[PythonFunction] = field(default_factory=list)
+    function_changes: List[FunctionChange] = field(default_factory=list)
+    
+    @property
+    def file_path(self) -> str:
+        return self.original_change.new_file
+    
+    @property
+    def is_python_file(self) -> bool:
+        return self.file_path.endswith('.py')
+    
+    @property
+    def hunks(self) -> List[DiffHunk]:
+        return self.original_change.hunks
 
 
-def parse_diff_output(diff_text: str) -> List[FileChange]:
+class FunctionAwareDiffParser:
+    """Parser that combines git diff information with Python function detection."""
+    
+    def __init__(self):
+        self.function_detector = PythonFunctionDetector()
+    
+    def parse_diff_with_functions(self, diff_text: str, repo_path: str) -> List[EnhancedFileChange]:
+        """
+        Parse git diff and enhance with function information for Python files.
+        
+        Args:
+            diff_text: Raw git diff output
+            repo_path: Path to the git repository to read file contents
+            
+        Returns:
+            List of EnhancedFileChange objects with function information
+        """
+        # First parse the diff normally
+        file_changes = parse_diff_output(diff_text)
+        enhanced_changes = []
+        
+        for change in file_changes:
+            enhanced_change = self._enhance_file_change(change, repo_path)
+            enhanced_changes.append(enhanced_change)
+        
+        return enhanced_changes
+    
+    def _enhance_file_change(self, change: FileChange, repo_path: str) -> EnhancedFileChange:
+        """Enhance a single FileChange with function information."""
+        enhanced = EnhancedFileChange(original_change=change)
+        
+        # Only process Python files
+        if not enhanced.is_python_file:
+            return enhanced
+        
+        try:
+            # Read the current version of the file
+            file_path = Path(repo_path) / change.new_file
+            if file_path.exists():
+                file_content = file_path.read_text(encoding='utf-8')
+                enhanced.detected_functions = self.function_detector.detect_functions(file_content)
+                enhanced.function_changes = self._map_hunks_to_functions(change.hunks, enhanced.detected_functions)
+        except Exception:
+            # If we can't read the file or detect functions, just return the basic enhanced change
+            pass
+        
+        return enhanced
+    
+    def _map_hunks_to_functions(self, hunks: List[DiffHunk], functions: List[PythonFunction]) -> List[FunctionChange]:
+        """Map diff hunks to the functions they affect."""
+        function_changes = []
+        
+        for hunk in hunks:
+            affected_lines = self._extract_changed_lines(hunk)
+            
+            # Find functions that overlap with the changed lines
+            for function in functions:
+                overlapping_lines = [
+                    line for line in affected_lines 
+                    if function.start_line <= line <= function.end_line
+                ]
+                
+                if overlapping_lines:
+                    # Determine change type based on the hunk content
+                    change_type = self._determine_change_type(hunk, function)
+                    
+                    function_change = FunctionChange(
+                        function=function,
+                        change_type=change_type,
+                        affected_lines=overlapping_lines
+                    )
+                    
+                    # Avoid duplicates
+                    if function_change not in function_changes:
+                        function_changes.append(function_change)
+        
+        return function_changes
+    
+    def _extract_changed_lines(self, hunk: DiffHunk) -> List[int]:
+        """Extract the line numbers that were actually changed in a hunk."""
+        changed_lines = []
+        current_new_line = hunk.new_start
+        
+        for line in hunk.lines:
+            if line.startswith('+'):
+                # Added line
+                changed_lines.append(current_new_line)
+                current_new_line += 1
+            elif line.startswith('-'):
+                # Deleted line - we don't increment new line counter
+                # but we should track this affects the function
+                continue
+            elif line.startswith(' '):
+                # Context line - increment counter but don't mark as changed
+                current_new_line += 1
+            else:
+                # Other types of lines (like @@), increment conservatively
+                current_new_line += 1
+        
+        return changed_lines
+    
+    def _determine_change_type(self, hunk: DiffHunk, function: PythonFunction) -> str:
+        """Determine the type of change affecting a function."""
+        has_additions = any(line.startswith('+') for line in hunk.lines)
+        has_deletions = any(line.startswith('-') for line in hunk.lines)
+        
+        # Check if the function declaration itself is being added/removed
+        function_declaration_affected = (
+            hunk.new_start <= function.start_line <= hunk.new_start + hunk.new_count
+        )
+        
+        if function_declaration_affected and has_additions and not has_deletions:
+            return 'added'
+        elif function_declaration_affected and has_deletions and not has_additions:
+            return 'deleted'
+        else:
+            return 'modified'
+
+
+def parse_git_diff_with_functions(diff_text: str, repo_path: str) -> List[EnhancedFileChange]:
     """
-    Parse git diff output into structured data.
+    Convenience function to parse git diff with function information.
     
     Args:
         diff_text: Raw git diff output
+        repo_path: Path to the git repository
         
     Returns:
-        List of FileChange objects representing the changes
+        List of EnhancedFileChange objects
     """
-    changes = []
-    
-    # Split diff into individual file sections
-    file_sections = re.split(r'^diff --git ', diff_text, flags=re.MULTILINE)[1:]
-    
-    for section in file_sections:
-        file_change = _parse_file_section(section)
-        if file_change:
-            changes.append(file_change)
-    
-    return changes
-
-
-def _parse_file_section(section: str) -> FileChange:
-    """Parse a single file section from git diff output."""
-    lines = section.split('\n')
-    
-    # Parse the file header
-    header_match = re.match(r'^a/(.+) b/(.+)', lines[0])
-    if not header_match:
-        return None
-    
-    old_file = header_match.group(1)
-    new_file = header_match.group(2)
-    
-    # Initialize defaults
-    old_mode = new_mode = "100644"
-    is_new_file = is_deleted_file = False
-    hunks = []
-    
-    i = 1
-    # Parse file metadata
-    while i < len(lines):
-        line = lines[i]
-        
-        if line.startswith('new file mode'):
-            is_new_file = True
-            new_mode = line.split()[-1]
-        elif line.startswith('deleted file mode'):
-            is_deleted_file = True
-            old_mode = line.split()[-1]
-        elif line.startswith('old mode'):
-            old_mode = line.split()[-1]
-        elif line.startswith('new mode'):
-            new_mode = line.split()[-1]
-        elif line.startswith('@@'):
-            # Start of diff hunks
-            hunks = _parse_hunks(lines[i:])
-            break
-        
-        i += 1
-    
-    return FileChange(
-        old_file=old_file,
-        new_file=new_file,
-        old_mode=old_mode,
-        new_mode=new_mode,
-        is_new_file=is_new_file,
-        is_deleted_file=is_deleted_file,
-        hunks=hunks
-    )
-
-
-def _parse_hunks(lines: List[str]) -> List[DiffHunk]:
-    """Parse diff hunks from remaining lines."""
-    hunks = []
-    current_hunk = None
-    
-    for line in lines:
-        if line.startswith('@@'):
-            # Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-            match = re.match(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@', line)
-            if match:
-                if current_hunk:
-                    hunks.append(current_hunk)
-                
-                old_start = int(match.group(1))
-                old_count = int(match.group(2)) if match.group(2) else 1
-                new_start = int(match.group(3))
-                new_count = int(match.group(4)) if match.group(4) else 1
-                
-                current_hunk = DiffHunk(
-                    old_start=old_start,
-                    old_count=old_count,
-                    new_start=new_start,
-                    new_count=new_count,
-                    lines=[]
-                )
-        elif current_hunk is not None:
-            current_hunk.lines.append(line)
-    
-    if current_hunk:
-        hunks.append(current_hunk)
-    
-    return hunks
+    parser = FunctionAwareDiffParser()
+    return parser.parse_diff_with_functions(diff_text, repo_path)

@@ -1,8 +1,10 @@
-"""Tests for git operations."""
+"""Tests for git operations with Windows-compatible cleanup."""
 
 import tempfile
 import os
 import sys
+import shutil
+import stat
 from pathlib import Path
 import pytest
 from git import Repo
@@ -14,9 +16,45 @@ from git_operations import clone_repository, get_commit_diff
 from diff_parser import parse_diff_output
 
 
+def remove_readonly(func, path, _):
+    """Error handler for Windows readonly files."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except Exception:
+        pass
+
+
+def safe_cleanup(temp_dir):
+    """Safely clean up temporary directory on Windows."""
+    if os.path.exists(temp_dir):
+        try:
+            # First, try to close any Git repositories
+            for root, dirs, files in os.walk(temp_dir):
+                if '.git' in dirs:
+                    git_dir = os.path.join(root, '.git')
+                    # Make all files writable
+                    for git_root, git_dirs, git_files in os.walk(git_dir):
+                        for file in git_files:
+                            file_path = os.path.join(git_root, file)
+                            if os.path.exists(file_path):
+                                os.chmod(file_path, stat.S_IWRITE)
+            
+            # Remove with error handler
+            shutil.rmtree(temp_dir, onerror=remove_readonly)
+        except Exception:
+            # If all else fails, try system rmdir on Windows
+            if os.name == 'nt':
+                try:
+                    os.system(f'rmdir /s /q "{temp_dir}"')
+                except Exception:
+                    pass
+
+
 def test_clone_repository():
     """Test cloning a repository."""
-    with tempfile.TemporaryDirectory() as temp_dir:
+    temp_dir = tempfile.mkdtemp()
+    try:
         # Create a test repo
         test_repo_dir = os.path.join(temp_dir, "test_repo")
         repo = Repo.init(test_repo_dir)
@@ -28,21 +66,32 @@ def test_clone_repository():
         repo.index.add([str(test_file)])
         repo.index.commit("Initial commit")
         
-        # Clone it
-        clone_dir = clone_repository(test_repo_dir)
-        
-        # Verify clone exists and has the file
-        assert os.path.exists(clone_dir)
-        assert os.path.exists(os.path.join(clone_dir, "test.txt"))
-        
-        cloned_repo = Repo(clone_dir)
-        assert len(list(cloned_repo.iter_commits())) == 1
+        # Clone it to a different location
+        clone_temp_dir = tempfile.mkdtemp()
+        try:
+            clone_dir = clone_repository(test_repo_dir, clone_temp_dir)
+            
+            # Verify clone exists and has the file
+            assert os.path.exists(clone_dir)
+            assert os.path.exists(os.path.join(clone_dir, "test.txt"))
+            
+            cloned_repo = Repo(clone_dir)
+            assert len(list(cloned_repo.iter_commits())) == 1
+        finally:
+            safe_cleanup(clone_temp_dir)
+    finally:
+        safe_cleanup(temp_dir)
 
 
 def test_get_commit_diff():
     """Test getting diff for a specific commit."""
-    with tempfile.TemporaryDirectory() as temp_dir:
+    temp_dir = tempfile.mkdtemp()
+    try:
         repo = Repo.init(temp_dir)
+        
+        # Configure git user (required for commits)
+        repo.config_writer().set_value("user", "name", "Test User").release()
+        repo.config_writer().set_value("user", "email", "test@example.com").release()
         
         # Create initial file
         test_file = Path(temp_dir) / "test.java"
@@ -60,6 +109,8 @@ def test_get_commit_diff():
         
         assert "test.java" in diff
         assert "+    public void method() {}" in diff
+    finally:
+        safe_cleanup(temp_dir)
 
 
 def test_parse_diff_output():
