@@ -1,4 +1,4 @@
-"""Enhanced tests for Python function detection and function-aware diff parsing with verbose output."""
+"""Enhanced tests for git operations with Windows-compatible cleanup and verbose output."""
 
 import tempfile
 import os
@@ -13,9 +13,8 @@ import json
 # Add the parent directory to the path so we can import our modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from python_function_detector import PythonFunctionDetector, PythonFunction
-from function_aware_diff import FunctionAwareDiffParser, parse_git_diff_with_functions, FunctionChange
-from git_operations import get_commit_diff
+from git_operations import clone_repository, get_commit_diff
+from diff_parser import parse_diff_output, FileChange, DiffHunk
 
 
 class TestResult:
@@ -51,40 +50,24 @@ class VerboseTestReporter:
             self._print_result(result)
     
     def _print_result(self, result):
-        print(f"\n{'='*80}")
+        print(f"\n{'='*60}")
         print(f"TEST: {result.test_name}")
         print(f"STATUS: {'PASS' if result.passed else 'FAIL'}")
-        print(f"{'='*80}")
+        print(f"{'='*60}")
         
-        if not result.passed and result.error:
+        if not result.passed:
             print(f"ERROR: {result.error}")
         
-        print("EXPECTED:")
-        if isinstance(result.expected, dict):
-            for key, value in result.expected.items():
-                print(f"  {key}: {value}")
-        else:
-            print(f"  {result.expected}")
-        
-        print("ACTUAL:")
-        if isinstance(result.actual, dict):
-            for key, value in result.actual.items():
-                print(f"  {key}: {value}")
-        else:
-            print(f"  {result.actual}")
-        print(f"{'='*80}\n")
+        print(f"EXPECTED: {result.expected}")
+        print(f"ACTUAL:   {result.actual}")
+        print(f"{'='*60}\n")
     
     def print_summary(self):
         if self.verbose:
             passed = sum(1 for r in self.results if r.passed)
             total = len(self.results)
             print(f"\n{'='*80}")
-            print(f"FUNCTION DETECTION TEST SUMMARY: {passed}/{total} PASSED")
-            if passed < total:
-                print("FAILED TESTS:")
-                for r in self.results:
-                    if not r.passed:
-                        print(f"  - {r.test_name}: {r.error or 'Assertion failed'}")
+            print(f"TEST SUMMARY: {passed}/{total} PASSED")
             print(f"{'='*80}")
 
 
@@ -105,17 +88,21 @@ def safe_cleanup(temp_dir):
     """Safely clean up temporary directory on Windows."""
     if os.path.exists(temp_dir):
         try:
+            # First, try to close any Git repositories
             for root, dirs, files in os.walk(temp_dir):
                 if '.git' in dirs:
                     git_dir = os.path.join(root, '.git')
+                    # Make all files writable
                     for git_root, git_dirs, git_files in os.walk(git_dir):
                         for file in git_files:
                             file_path = os.path.join(git_root, file)
                             if os.path.exists(file_path):
                                 os.chmod(file_path, stat.S_IWRITE)
             
+            # Remove with error handler
             shutil.rmtree(temp_dir, onerror=remove_readonly)
         except Exception:
+            # If all else fails, try system rmdir on Windows
             if os.name == 'nt':
                 try:
                     os.system(f'rmdir /s /q "{temp_dir}"')
@@ -123,596 +110,216 @@ def safe_cleanup(temp_dir):
                     pass
 
 
-class TestPythonFunctionDetector:
-    """Enhanced test cases for Python function detection."""
+def create_test_repo_with_history(temp_dir):
+    """Create a test repository with multiple commits for testing."""
+    repo = Repo.init(temp_dir)
     
-    def test_detect_simple_functions(self):
-        """Test detecting simple Python functions."""
-        python_code = '''
-def simple_function():
-    """A simple function."""
-    print("Hello World")
-    return True
-
-def another_function(param1, param2="default"):
-    """Function with parameters."""
-    result = param1 + len(param2)
-    return result
-'''
-        detector = PythonFunctionDetector()
-        functions = detector.detect_functions(python_code)
-        
-        expected = {
-            "function_count": 2,
-            "function_names": ["simple_function", "another_function"],
-            "all_are_functions": True,
-            "none_are_methods": True
-        }
-        
-        function_names = [func.name for func in functions]
-        actual = {
-            "function_count": len(functions),
-            "function_names": function_names,
-            "all_are_functions": all(not func.is_method for func in functions),
-            "none_are_methods": all(func.class_name is None for func in functions)
-        }
-        
-        passed = (
-            len(functions) == 2 and
-            set(function_names) == {"simple_function", "another_function"} and
-            all(not func.is_method for func in functions) and
-            all(func.class_name is None for func in functions)
-        )
-        
-        reporter.record_result("detect_simple_functions", expected, actual, passed)
-        assert passed
+    # Configure git user (required for commits)
+    repo.config_writer().set_value("user", "name", "Test User").release()
+    repo.config_writer().set_value("user", "email", "test@example.com").release()
     
-    def test_detect_async_functions(self):
-        """Test detecting async functions with various patterns."""
-        python_code = '''
-import asyncio
-
-async def simple_async():
-    """Simple async function."""
-    await asyncio.sleep(1)
-    return "done"
-
-async def async_with_params(data, timeout=5):
-    """Async function with parameters."""
-    await asyncio.wait_for(process_data(data), timeout=timeout)
-    return data
-
-def regular_function():
-    """Regular synchronous function."""
-    return "sync result"
-
-async def async_generator():
-    """Async generator function."""
-    for i in range(10):
-        yield await asyncio.sleep(0.1, result=i)
-'''
-        detector = PythonFunctionDetector()
-        functions = detector.detect_functions(python_code)
-        
-        async_functions = [f for f in functions if f.is_async]
-        sync_functions = [f for f in functions if not f.is_async]
-        
-        expected = {
-            "total_functions": 4,
-            "async_count": 3,
-            "sync_count": 1,
-            "async_names": ["simple_async", "async_with_params", "async_generator"],
-            "sync_names": ["regular_function"]
-        }
-        
-        actual = {
-            "total_functions": len(functions),
-            "async_count": len(async_functions),
-            "sync_count": len(sync_functions),
-            "async_names": [f.name for f in async_functions],
-            "sync_names": [f.name for f in sync_functions]
-        }
-        
-        passed = (
-            len(functions) == 4 and
-            len(async_functions) == 3 and
-            len(sync_functions) == 1 and
-            set(f.name for f in async_functions) == {"simple_async", "async_with_params", "async_generator"} and
-            set(f.name for f in sync_functions) == {"regular_function"}
-        )
-        
-        reporter.record_result("detect_async_functions", expected, actual, passed)
-        assert passed
+    commits = []
     
-    def test_detect_class_methods_comprehensive(self):
-        """Test detecting methods in classes with various decorators and patterns."""
-        python_code = '''
-class ComprehensiveClass:
-    """A class with various types of methods."""
-    
-    def __init__(self, value=0):
-        """Constructor method."""
-        self.value = value
-        self._private_value = value * 2
-    
-    def regular_method(self, increment):
-        """Regular instance method."""
-        self.value += increment
-        return self.value
-    
-    @classmethod
-    def class_method(cls, initial_value):
-        """Class method constructor."""
-        return cls(initial_value)
-    
-    @staticmethod
-    def static_method(a, b):
-        """Static method for utility."""
-        return a * b + 10
-    
-    @property
-    def current_value(self):
-        """Property getter."""
-        return self.value
-    
-    @current_value.setter
-    def current_value(self, new_value):
-        """Property setter."""
-        self.value = new_value
-    
-    async def async_method(self):
-        """Async instance method."""
-        await some_async_operation()
-        return self.value
-    
-    def _private_method(self):
-        """Private method (by convention)."""
-        return self._private_value
-
-    @property
-    @deprecated
-    def old_property(self):
-        """Property with multiple decorators."""
-        return "deprecated"
-'''
-        detector = PythonFunctionDetector()
-        functions = detector.detect_functions(python_code)
-        
-        # Filter methods only
-        methods = [f for f in functions if f.is_method and f.class_name == "ComprehensiveClass"]
-        
-        # Categorize by decorator types
-        property_methods = [f for f in methods if "property" in f.decorator_names]
-        classmethod_methods = [f for f in methods if "classmethod" in f.decorator_names]
-        staticmethod_methods = [f for f in methods if "staticmethod" in f.decorator_names]
-        async_methods = [f for f in methods if f.is_async]
-        regular_methods = [f for f in methods if not f.decorator_names and not f.is_async]
-        
-        expected = {
-            "total_methods": 9,
-            "property_count": 3,  # current_value getter, setter, old_property
-            "classmethod_count": 1,
-            "staticmethod_count": 1,
-            "async_count": 1,
-            "regular_count": 4,  # __init__, regular_method, _private_method, setter
-            "all_belong_to_class": True
-        }
-        
-        actual = {
-            "total_methods": len(methods),
-            "property_count": len(property_methods),
-            "classmethod_count": len(classmethod_methods),
-            "staticmethod_count": len(staticmethod_methods),
-            "async_count": len(async_methods),
-            "regular_count": len(regular_methods),
-            "all_belong_to_class": all(m.class_name == "ComprehensiveClass" for m in methods)
-        }
-        
-        passed = (
-            len(methods) == 9 and
-            len(property_methods) == 3 and
-            len(classmethod_methods) == 1 and
-            len(staticmethod_methods) == 1 and
-            len(async_methods) == 1 and
-            all(m.class_name == "ComprehensiveClass" for m in methods) and
-            all(m.is_method for m in methods)
-        )
-        
-        reporter.record_result("detect_class_methods_comprehensive", expected, actual, passed)
-        assert passed
-    
-    def test_detect_nested_functions_and_classes(self):
-        """Test detecting nested functions and classes."""
-        python_code = '''
-def outer_function(data):
-    """Outer function with nested components."""
-    
-    def inner_function(item):
-        """Nested function."""
-        return item * 2
-    
-    class InnerClass:
-        """Nested class."""
-        
-        def __init__(self, value):
-            self.value = value
-        
-        def process(self):
-            """Method in nested class."""
-            return inner_function(self.value)
-    
-    async def inner_async():
-        """Nested async function."""
-        return await some_operation()
-    
-    result = []
-    for item in data:
-        processor = InnerClass(item)
-        result.append(processor.process())
-    
-    return result
-
-class OuterClass:
-    """Outer class."""
-    
-    def method_with_nested(self):
-        """Method containing nested function."""
-        
-        def nested_in_method():
-            """Function nested in method."""
-            return "nested result"
-        
-        return nested_in_method()
-'''
-        detector = PythonFunctionDetector()
-        functions = detector.detect_functions(python_code)
-        
-        # Categorize functions
-        outer_level = [f for f in functions if f.class_name is None and f.name == "outer_function"]
-        inner_functions = [f for f in functions if f.class_name is None and f.name in ["inner_function", "inner_async", "nested_in_method"]]
-        outer_class_methods = [f for f in functions if f.class_name == "OuterClass"]
-        inner_class_methods = [f for f in functions if f.class_name == "InnerClass"]
-        
-        expected = {
-            "total_functions": 7,
-            "outer_function_count": 1,
-            "nested_function_count": 3,  # inner_function, inner_async, nested_in_method
-            "outer_class_method_count": 1,
-            "inner_class_method_count": 2,
-            "async_nested_count": 1
-        }
-        
-        async_nested = [f for f in inner_functions if f.is_async]
-        
-        actual = {
-            "total_functions": len(functions),
-            "outer_function_count": len(outer_level),
-            "nested_function_count": len(inner_functions),
-            "outer_class_method_count": len(outer_class_methods),
-            "inner_class_method_count": len(inner_class_methods),
-            "async_nested_count": len(async_nested)
-        }
-        
-        passed = (
-            len(functions) == 7 and
-            len(outer_level) == 1 and
-            len(inner_functions) == 3 and
-            len(outer_class_methods) == 1 and
-            len(inner_class_methods) == 2 and
-            len(async_nested) == 1
-        )
-        
-        reporter.record_result("detect_nested_functions_and_classes", expected, actual, passed)
-        assert passed
-    
-    def test_find_functions_at_specific_lines(self):
-        """Test finding functions that contain specific line numbers."""
-        python_code = '''def function_one():
-    x = 1
-    y = 2
-    return x + y
-
-def function_two():
-    z = 3
-    w = 4
-    return z * w
-
-class Calculator:
-    def add(self, a, b):
-        result = a + b
-        return result
-    
-    def multiply(self, a, b):
-        result = a * b
-        return result
-'''
-        detector = PythonFunctionDetector()
-        
-        test_cases = [
-            {"lines": [3], "expected_functions": ["function_one"]},
-            {"lines": [8], "expected_functions": ["function_two"]},
-            {"lines": [13], "expected_functions": ["add"]},
-            {"lines": [17], "expected_functions": ["multiply"]},
-            {"lines": [3, 8], "expected_functions": ["function_one", "function_two"]},
-            {"lines": [13, 17], "expected_functions": ["add", "multiply"]},
-            {"lines": [100], "expected_functions": []},  # Line outside any function
-        ]
-        
-        all_passed = True
-        for i, test_case in enumerate(test_cases):
-            functions = detector.find_functions_at_lines(python_code, test_case["lines"])
-            found_names = [f.name for f in functions]
-            expected_names = test_case["expected_functions"]
-            
-            case_passed = set(found_names) == set(expected_names)
-            all_passed = all_passed and case_passed
-            
-            reporter.record_result(
-                f"find_functions_at_lines_case_{i+1}",
-                {"lines": test_case["lines"], "expected": expected_names},
-                {"lines": test_case["lines"], "found": found_names},
-                case_passed
-            )
-        
-        assert all_passed
-    
-    def test_detect_functions_with_syntax_errors(self):
-        """Test handling of Python code with syntax errors."""
-        invalid_python_codes = [
-            "def incomplete_function(",  # Missing closing parenthesis
-            "def function():\nreturn x\n  return y",  # Indentation error
-            "class Class\n  def method():\n    pass",  # Missing colon
-            "",  # Empty string
-            "not python code at all",  # Not Python
-        ]
-        
-        detector = PythonFunctionDetector()
-        
-        all_handled_gracefully = True
-        for i, code in enumerate(invalid_python_codes):
-            try:
-                functions = detector.detect_functions(code)
-                # Should return empty list for invalid code
-                case_passed = len(functions) == 0
-                
-                reporter.record_result(
-                    f"syntax_error_handling_case_{i+1}",
-                    {"functions_found": 0, "error_handled": True},
-                    {"functions_found": len(functions), "error_handled": True},
-                    case_passed
-                )
-                
-                all_handled_gracefully = all_handled_gracefully and case_passed
-                
-            except Exception as e:
-                reporter.record_result(
-                    f"syntax_error_handling_case_{i+1}",
-                    {"functions_found": 0, "error_handled": True},
-                    {"error_raised": str(e), "error_handled": False},
-                    False,
-                    e
-                )
-                all_handled_gracefully = False
-        
-        assert all_handled_gracefully
-
-
-class TestFunctionAwareDiffParser:
-    """Enhanced test cases for function-aware diff parsing."""
-    
-    def test_parse_diff_with_function_addition(self):
-        """Test parsing diff that adds new Python functions."""
-        temp_dir = tempfile.mkdtemp()
-        try:
-            repo = Repo.init(temp_dir)
-            repo.config_writer().set_value("user", "name", "Test User").release()
-            repo.config_writer().set_value("user", "email", "test@example.com").release()
-            
-            # Initial Python file
-            python_file = Path(temp_dir) / "math_utils.py"
-            python_file.write_text('''def add(a, b):
+    # Commit 1: Initial Python file
+    python_file = Path(temp_dir) / "calculator.py"
+    python_file.write_text('''def add(a, b):
     """Add two numbers."""
     return a + b
 ''')
-            
-            repo.index.add([str(python_file)])
-            first_commit = repo.index.commit("Initial commit")
-            
-            # Add new functions
-            python_file.write_text('''def add(a, b):
+    repo.index.add([str(python_file)])
+    commits.append(repo.index.commit("Initial commit - add function"))
+    
+    # Commit 2: Add another function
+    python_file.write_text('''def add(a, b):
     """Add two numbers."""
     return a + b
 
 def subtract(a, b):
     """Subtract b from a."""
     return a - b
+''')
+    repo.index.add([str(python_file)])
+    commits.append(repo.index.commit("Add subtract function"))
+    
+    # Commit 3: Modify existing function
+    python_file.write_text('''def add(a, b):
+    """Add two numbers with validation."""
+    if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+        raise TypeError("Arguments must be numbers")
+    return a + b
 
-async def multiply_async(a, b):
-    """Async multiplication."""
-    return a * b
+def subtract(a, b):
+    """Subtract b from a."""
+    return a - b
+''')
+    repo.index.add([str(python_file)])
+    commits.append(repo.index.commit("Add validation to add function"))
+    
+    # Commit 4: Add a class
+    python_file.write_text('''def add(a, b):
+    """Add two numbers with validation."""
+    if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+        raise TypeError("Arguments must be numbers")
+    return a + b
+
+def subtract(a, b):
+    """Subtract b from a."""
+    return a - b
 
 class Calculator:
-    """Calculator class."""
-    
-    def divide(self, a, b):
-        """Divide a by b."""
-        if b == 0:
-            raise ValueError("Cannot divide by zero")
-        return a / b
-''')
-            
-            repo.index.add([str(python_file)])
-            second_commit = repo.index.commit("Add new functions and class")
-            
-            # Parse the diff
-            diff_text = get_commit_diff(temp_dir, second_commit.hexsha)
-            enhanced_changes = parse_git_diff_with_functions(diff_text, temp_dir)
-            
-            assert len(enhanced_changes) == 1
-            change = enhanced_changes[0]
-            
-            expected = {
-                "is_python_file": True,
-                "total_functions_detected": 4,  # add, subtract, multiply_async, divide
-                "function_changes_count": 3,    # subtract, multiply_async, divide (add is unchanged)
-                "added_functions": ["subtract", "multiply_async", "divide"],
-                "has_async_function": True,
-                "has_class_method": True
-            }
-            
-            function_names = [f.name for f in change.detected_functions]
-            function_change_names = [fc.function.name for fc in change.function_changes]
-            added_functions = [fc.function.name for fc in change.function_changes if fc.change_type == "added"]
-            has_async = any(f.is_async for f in change.detected_functions)
-            has_method = any(f.is_method for f in change.detected_functions)
-            
-            actual = {
-                "is_python_file": change.is_python_file,
-                "total_functions_detected": len(change.detected_functions),
-                "function_changes_count": len(change.function_changes),
-                "added_functions": added_functions,
-                "has_async_function": has_async,
-                "has_class_method": has_method
-            }
-            
-            passed = (
-                change.is_python_file and
-                len(change.detected_functions) == 4 and
-                len(change.function_changes) >= 3 and  # Allow for slight variations in parsing
-                set(added_functions).issuperset({"subtract", "multiply_async", "divide"}) and
-                has_async and
-                has_method
-            )
-            
-            reporter.record_result("parse_diff_with_function_addition", expected, actual, passed)
-            assert passed
-            
-        except Exception as e:
-            reporter.record_result(
-                "parse_diff_with_function_addition",
-                "Successful function addition detection",
-                f"Failed with error: {e}",
-                False,
-                e
-            )
-            raise
-        finally:
-            safe_cleanup(temp_dir)
-    
-    def test_parse_diff_with_function_modification(self):
-        """Test parsing diff that modifies existing Python functions."""
-        temp_dir = tempfile.mkdtemp()
-        try:
-            repo = Repo.init(temp_dir)
-            repo.config_writer().set_value("user", "name", "Test User").release()
-            repo.config_writer().set_value("user", "email", "test@example.com").release()
-            
-            # Initial Python file with multiple functions
-            python_file = Path(temp_dir) / "service.py"
-            python_file.write_text('''def process_data(data):
-    """Process the input data."""
-    return data.upper()
-
-def validate_input(data):
-    """Validate input data."""
-    return len(data) > 0
-
-class DataProcessor:
-    """Data processing class."""
+    """A simple calculator class."""
     
     def __init__(self):
-        self.processed_count = 0
+        self.result = 0
     
-    def process(self, item):
-        """Process a single item."""
-        result = item * 2
-        self.processed_count += 1
-        return result
-''')
-            
-            repo.index.add([str(python_file)])
-            first_commit = repo.index.commit("Initial commit")
-            
-            # Modify existing functions
-            python_file.write_text('''def process_data(data):
-    """Process the input data with validation."""
-    if not data:
-        raise ValueError("Data cannot be empty")
-    
-    # Enhanced processing
-    result = data.upper().strip()
-    return result
-
-def validate_input(data):
-    """Validate input data with type checking."""
-    if not isinstance(data, str):
-        return False
-    return len(data) > 0
-
-class DataProcessor:
-    """Enhanced data processing class."""
-    
-    def __init__(self, max_items=100):
-        self.processed_count = 0
-        self.max_items = max_items
-    
-    def process(self, item):
-        """Process a single item with limit checking."""
-        if self.processed_count >= self.max_items:
-            raise ValueError("Maximum items processed")
-        
-        result = item * 2
-        self.processed_count += 1
-        return result
+    def add(self, value):
+        """Add value to current result."""
+        self.result += value
+        return self.result
     
     def reset(self):
-        """Reset the processor state."""
-        self.processed_count = 0
+        """Reset calculator to zero."""
+        self.result = 0
 ''')
+    repo.index.add([str(python_file)])
+    commits.append(repo.index.commit("Add Calculator class"))
+    
+    # Commit 5: Add non-Python file
+    readme_file = Path(temp_dir) / "README.md"
+    readme_file.write_text("# Calculator Project\n\nA simple calculator implementation.")
+    repo.index.add([str(readme_file)])
+    commits.append(repo.index.commit("Add README"))
+    
+    return repo, commits
+
+
+class TestCloneRepository:
+    """Test repository cloning functionality."""
+    
+    def test_clone_repository_to_temp_dir(self):
+        """Test cloning a repository to a temporary directory."""
+        source_temp_dir = tempfile.mkdtemp()
+        clone_temp_dir = None
+        
+        try:
+            # Create source repo
+            repo, commits = create_test_repo_with_history(source_temp_dir)
+            expected_commits = len(commits)
             
-            repo.index.add([str(python_file)])
-            second_commit = repo.index.commit("Enhance functions with validation")
+            # Clone it
+            clone_temp_dir = tempfile.mkdtemp()
+            result_dir = clone_repository(source_temp_dir, clone_temp_dir)
             
-            # Parse the diff
-            diff_text = get_commit_diff(temp_dir, second_commit.hexsha)
-            enhanced_changes = parse_git_diff_with_functions(diff_text, temp_dir)
+            # Verify
+            assert result_dir == clone_temp_dir
+            assert os.path.exists(result_dir)
+            assert os.path.exists(os.path.join(result_dir, "calculator.py"))
             
-            assert len(enhanced_changes) == 1
-            change = enhanced_changes[0]
+            cloned_repo = Repo(result_dir)
+            actual_commits = len(list(cloned_repo.iter_commits()))
             
-            modified_functions = [fc.function.name for fc in change.function_changes if fc.change_type == "modified"]
-            added_functions = [fc.function.name for fc in change.function_changes if fc.change_type == "added"]
-            
-            expected = {
-                "total_detected_functions": 5,  # process_data, validate_input, __init__, process, reset
-                "modified_functions": ["process_data", "validate_input", "__init__", "process"],
-                "added_functions": ["reset"],
-                "has_modifications": True,
-                "has_additions": True
-            }
-            
-            actual = {
-                "total_detected_functions": len(change.detected_functions),
-                "modified_functions": modified_functions,
-                "added_functions": added_functions,
-                "has_modifications": len(modified_functions) > 0,
-                "has_additions": len(added_functions) > 0
-            }
-            
-            passed = (
-                len(change.detected_functions) == 5 and
-                len(modified_functions) >= 3 and  # At least process_data, validate_input, and one method
-                "reset" in added_functions and
-                len(change.function_changes) > 0
+            reporter.record_result(
+                "clone_repository_to_temp_dir",
+                f"Cloned repo with {expected_commits} commits",
+                f"Cloned repo with {actual_commits} commits",
+                actual_commits == expected_commits
             )
             
-            reporter.record_result("parse_diff_with_function_modification", expected, actual, passed)
-            assert passed
+            assert actual_commits == expected_commits
             
         except Exception as e:
             reporter.record_result(
-                "parse_diff_with_function_modification",
-                "Successful function modification detection",
+                "clone_repository_to_temp_dir",
+                "Successful clone",
+                f"Failed with error: {e}",
+                False,
+                e
+            )
+            raise
+        finally:
+            safe_cleanup(source_temp_dir)
+            if clone_temp_dir:
+                safe_cleanup(clone_temp_dir)
+    
+    def test_clone_repository_auto_temp_dir(self):
+        """Test cloning to automatically created temp directory."""
+        source_temp_dir = tempfile.mkdtemp()
+        clone_dir = None
+        
+        try:
+            # Create source repo
+            repo, commits = create_test_repo_with_history(source_temp_dir)
+            
+            # Clone without specifying target
+            clone_dir = clone_repository(source_temp_dir)
+            
+            # Verify
+            assert clone_dir is not None
+            assert os.path.exists(clone_dir)
+            assert os.path.exists(os.path.join(clone_dir, "calculator.py"))
+            
+            cloned_repo = Repo(clone_dir)
+            commit_count = len(list(cloned_repo.iter_commits()))
+            expected_count = len(commits)
+            
+            reporter.record_result(
+                "clone_repository_auto_temp_dir",
+                f"Auto-created temp dir with {expected_count} commits",
+                f"Created {clone_dir} with {commit_count} commits",
+                commit_count == expected_count and os.path.exists(clone_dir)
+            )
+            
+            assert commit_count == expected_count
+            
+        except Exception as e:
+            reporter.record_result(
+                "clone_repository_auto_temp_dir",
+                "Successful auto-clone",
+                f"Failed with error: {e}",
+                False,
+                e
+            )
+            raise
+        finally:
+            safe_cleanup(source_temp_dir)
+            if clone_dir:
+                safe_cleanup(clone_dir)
+
+
+class TestGetCommitDiff:
+    """Test commit diff retrieval functionality."""
+    
+    def test_get_commit_diff_basic(self):
+        """Test getting diff for a basic commit."""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            repo, commits = create_test_repo_with_history(temp_dir)
+            
+            # Get diff for the second commit (adds subtract function)
+            diff = get_commit_diff(temp_dir, commits[1].hexsha)
+            
+            expected_content = [
+                "calculator.py",
+                "+def subtract(a, b):",
+                "+    \"\"\"Subtract b from a.\"\"\"",
+                "+    return a - b"
+            ]
+            
+            all_present = all(content in diff for content in expected_content)
+            
+            reporter.record_result(
+                "get_commit_diff_basic",
+                f"Diff containing: {expected_content}",
+                f"Diff content (length {len(diff)}): {'All expected content found' if all_present else 'Missing expected content'}",
+                all_present
+            )
+            
+            assert all_present
+            
+        except Exception as e:
+            reporter.record_result(
+                "get_commit_diff_basic",
+                "Valid diff output",
                 f"Failed with error: {e}",
                 False,
                 e
@@ -721,83 +328,36 @@ class DataProcessor:
         finally:
             safe_cleanup(temp_dir)
     
-    def test_parse_diff_mixed_file_types(self):
-        """Test parsing diff with both Python and non-Python files."""
+    def test_get_commit_diff_with_parent(self):
+        """Test getting diff between specific commits."""
         temp_dir = tempfile.mkdtemp()
         try:
-            repo = Repo.init(temp_dir)
-            repo.config_writer().set_value("user", "name", "Test User").release()
-            repo.config_writer().set_value("user", "email", "test@example.com").release()
+            repo, commits = create_test_repo_with_history(temp_dir)
             
-            # Create multiple file types
-            python_file = Path(temp_dir) / "module.py"
-            python_file.write_text('''def hello():
-    return "Hello"
-''')
+            # Get diff between first and third commit
+            diff = get_commit_diff(temp_dir, commits[2].hexsha, commits[0].hexsha)
             
-            js_file = Path(temp_dir) / "script.js"
-            js_file.write_text('function hello() { return "Hello"; }')
+            # Should show both the subtract function addition and add function modification
+            expected_additions = [
+                "+def subtract(a, b):",
+                "+    if not isinstance(a, (int, float))"
+            ]
             
-            txt_file = Path(temp_dir) / "readme.txt"
-            txt_file.write_text("Initial readme content")
+            contains_additions = all(addition in diff for addition in expected_additions)
             
-            repo.index.add([str(python_file), str(js_file), str(txt_file)])
-            first_commit = repo.index.commit("Initial commit")
-            
-            # Modify all files
-            python_file.write_text('''def hello():
-    return "Hello"
-
-def goodbye():
-    return "Goodbye"
-''')
-            
-            js_file.write_text('''function hello() { return "Hello"; }
-function goodbye() { return "Goodbye"; }''')
-            
-            txt_file.write_text("Updated readme content with more information")
-            
-            repo.index.add([str(python_file), str(js_file), str(txt_file)])
-            second_commit = repo.index.commit("Update all files")
-            
-            # Parse the diff
-            diff_text = get_commit_diff(temp_dir, second_commit.hexsha)
-            enhanced_changes = parse_git_diff_with_functions(diff_text, temp_dir)
-            
-            python_changes = [c for c in enhanced_changes if c.is_python_file]
-            non_python_changes = [c for c in enhanced_changes if not c.is_python_file]
-            
-            expected = {
-                "total_files_changed": 3,
-                "python_files_changed": 1,
-                "non_python_files_changed": 2,
-                "python_functions_detected": True,
-                "non_python_functions_detected": False
-            }
-            
-            actual = {
-                "total_files_changed": len(enhanced_changes),
-                "python_files_changed": len(python_changes),
-                "non_python_files_changed": len(non_python_changes),
-                "python_functions_detected": len(python_changes[0].detected_functions) > 0 if python_changes else False,
-                "non_python_functions_detected": any(len(c.detected_functions) > 0 for c in non_python_changes)
-            }
-            
-            passed = (
-                len(enhanced_changes) == 3 and
-                len(python_changes) == 1 and
-                len(non_python_changes) == 2 and
-                len(python_changes[0].detected_functions) > 0 and
-                all(len(c.detected_functions) == 0 for c in non_python_changes)
+            reporter.record_result(
+                "get_commit_diff_with_parent",
+                f"Diff showing additions: {expected_additions}",
+                f"Diff contains expected additions: {contains_additions}",
+                contains_additions
             )
             
-            reporter.record_result("parse_diff_mixed_file_types", expected, actual, passed)
-            assert passed
+            assert contains_additions
             
         except Exception as e:
             reporter.record_result(
-                "parse_diff_mixed_file_types",
-                "Successful mixed file type handling",
+                "get_commit_diff_with_parent",
+                "Valid diff between specific commits",
                 f"Failed with error: {e}",
                 False,
                 e
@@ -806,77 +366,39 @@ function goodbye() { return "Goodbye"; }''')
         finally:
             safe_cleanup(temp_dir)
     
-    def test_parse_diff_edge_cases(self):
-        """Test parsing diff with edge cases."""
+    def test_get_commit_diff_initial_commit(self):
+        """Test getting diff for initial commit (no parent)."""
         temp_dir = tempfile.mkdtemp()
         try:
             repo = Repo.init(temp_dir)
             repo.config_writer().set_value("user", "name", "Test User").release()
             repo.config_writer().set_value("user", "email", "test@example.com").release()
             
-            # Create file that will be deleted
-            python_file = Path(temp_dir) / "to_delete.py"
-            python_file.write_text('''def function_to_delete():
-    return "will be deleted"
-''')
+            # Create initial file
+            test_file = Path(temp_dir) / "initial.py"
+            test_file.write_text("print('Hello, World!')")
+            repo.index.add([str(test_file)])
+            initial_commit = repo.index.commit("Initial commit")
             
-            # Create file that will be renamed
-            python_file2 = Path(temp_dir) / "old_name.py"
-            python_file2.write_text('''def persistent_function():
-    return "survives rename"
-''')
+            # Get diff for initial commit
+            diff = get_commit_diff(temp_dir, initial_commit.hexsha)
             
-            repo.index.add([str(python_file), str(python_file2)])
-            first_commit = repo.index.commit("Initial commit")
+            expected_in_diff = "print('Hello, World!')"
+            contains_expected = expected_in_diff in diff
             
-            # Delete first file
-            python_file.unlink()
+            reporter.record_result(
+                "get_commit_diff_initial_commit",
+                f"Diff containing: {expected_in_diff}",
+                f"Diff contains expected content: {contains_expected}",
+                contains_expected
+            )
             
-            # Rename second file
-            new_name = Path(temp_dir) / "new_name.py"
-            python_file2.rename(new_name)
-            
-            # Modify renamed file
-            new_name.write_text('''def persistent_function():
-    """Updated documentation."""
-    return "survives rename"
-
-def new_function():
-    return "added after rename"
-''')
-            
-            repo.index.remove([str(python_file), str(python_file2)])
-            repo.index.add([str(new_name)])
-            second_commit = repo.index.commit("Delete, rename, and modify files")
-            
-            # Parse the diff
-            diff_text = get_commit_diff(temp_dir, second_commit.hexsha)
-            enhanced_changes = parse_git_diff_with_functions(diff_text, temp_dir)
-            
-            # This is complex - the parser should handle file operations gracefully
-            python_changes = [c for c in enhanced_changes if c.file_path.endswith('.py')]
-            
-            expected = {
-                "handled_gracefully": True,
-                "python_files_processed": True,
-                "no_exceptions_raised": True
-            }
-            
-            actual = {
-                "handled_gracefully": len(enhanced_changes) > 0,
-                "python_files_processed": len(python_changes) > 0,
-                "no_exceptions_raised": True
-            }
-            
-            passed = len(enhanced_changes) > 0  # Basic requirement: no crashes
-            
-            reporter.record_result("parse_diff_edge_cases", expected, actual, passed)
-            assert passed
+            assert contains_expected
             
         except Exception as e:
             reporter.record_result(
-                "parse_diff_edge_cases",
-                "Graceful handling of edge cases",
+                "get_commit_diff_initial_commit",
+                "Valid initial commit diff",
                 f"Failed with error: {e}",
                 False,
                 e
@@ -884,6 +406,210 @@ def new_function():
             raise
         finally:
             safe_cleanup(temp_dir)
+
+
+class TestParseDiffOutput:
+    """Test diff parsing functionality."""
+    
+    def test_parse_single_file_diff(self):
+        """Test parsing diff for a single file."""
+        sample_diff = """diff --git a/test.py b/test.py
+index abc123..def456 100644
+--- a/test.py
++++ b/test.py
+@@ -1,3 +1,5 @@
+ def existing_function():
++    print("Debug message")
+     return True
++
++def new_function():
++    pass"""
+        
+        changes = parse_diff_output(sample_diff)
+        
+        expected = {
+            "file_count": 1,
+            "file_name": "test.py",
+            "hunk_count": 1,
+            "added_lines": 3
+        }
+        
+        actual = {
+            "file_count": len(changes),
+            "file_name": changes[0].new_file if changes else None,
+            "hunk_count": len(changes[0].hunks) if changes else 0,
+            "added_lines": sum(1 for line in changes[0].hunks[0].lines if line.startswith('+')) if changes and changes[0].hunks else 0
+        }
+        
+        passed = (
+            len(changes) == 1 and
+            changes[0].new_file == "test.py" and
+            len(changes[0].hunks) == 1 and
+            sum(1 for line in changes[0].hunks[0].lines if line.startswith('+')) == 3
+        )
+        
+        reporter.record_result(
+            "parse_single_file_diff",
+            str(expected),
+            str(actual),
+            passed
+        )
+        
+        assert passed
+    
+    def test_parse_multiple_file_diff(self):
+        """Test parsing diff for multiple files."""
+        sample_diff = """diff --git a/file1.py b/file1.py
+index abc123..def456 100644
+--- a/file1.py
++++ b/file1.py
+@@ -1,2 +1,3 @@
+ print("file1")
++print("modified file1")
+ # end file1
+diff --git a/file2.py b/file2.py
+index 123abc..456def 100644
+--- a/file2.py
++++ b/file2.py
+@@ -1,1 +1,2 @@
+ print("file2")
++print("modified file2")"""
+        
+        changes = parse_diff_output(sample_diff)
+        
+        expected = {
+            "file_count": 2,
+            "files": ["file1.py", "file2.py"],
+            "total_hunks": 2
+        }
+        
+        actual_files = [change.new_file for change in changes]
+        actual = {
+            "file_count": len(changes),
+            "files": actual_files,
+            "total_hunks": sum(len(change.hunks) for change in changes)
+        }
+        
+        passed = (
+            len(changes) == 2 and
+            "file1.py" in actual_files and
+            "file2.py" in actual_files and
+            sum(len(change.hunks) for change in changes) == 2
+        )
+        
+        reporter.record_result(
+            "parse_multiple_file_diff",
+            str(expected),
+            str(actual),
+            passed
+        )
+        
+        assert passed
+    
+    def test_parse_diff_with_complex_hunks(self):
+        """Test parsing diff with multiple hunks in one file."""
+        sample_diff = """diff --git a/complex.py b/complex.py
+index abc123..def456 100644
+--- a/complex.py
++++ b/complex.py
+@@ -1,5 +1,6 @@
+ def function1():
++    print("Added to function1")
+     return 1
+
+ def function2():
+@@ -10,8 +11,10 @@ def function2():
+ def function3():
+     return 3
+
++def new_function():
++    return "new"
++
+ # End of file"""
+        
+        changes = parse_diff_output(sample_diff)
+        
+        expected = {
+            "file_count": 1,
+            "hunk_count": 2,
+            "first_hunk_start": 1,
+            "second_hunk_start": 10
+        }
+        
+        actual = {
+            "file_count": len(changes),
+            "hunk_count": len(changes[0].hunks) if changes else 0,
+            "first_hunk_start": changes[0].hunks[0].new_start if changes and changes[0].hunks else None,
+            "second_hunk_start": changes[0].hunks[1].new_start if changes and len(changes[0].hunks) > 1 else None
+        }
+        
+        passed = (
+            len(changes) == 1 and
+            len(changes[0].hunks) == 2 and
+            changes[0].hunks[0].new_start == 1 and
+            changes[0].hunks[1].new_start == 10
+        )
+        
+        reporter.record_result(
+            "parse_diff_with_complex_hunks",
+            str(expected),
+            str(actual),
+            passed
+        )
+        
+        assert passed
+    
+    def test_parse_empty_diff(self):
+        """Test parsing empty diff."""
+        empty_diff = ""
+        changes = parse_diff_output(empty_diff)
+        
+        expected = {"file_count": 0}
+        actual = {"file_count": len(changes)}
+        
+        passed = len(changes) == 0
+        
+        reporter.record_result(
+            "parse_empty_diff",
+            str(expected),
+            str(actual),
+            passed
+        )
+        
+        assert passed
+    
+    def test_parse_malformed_diff(self):
+        """Test parsing malformed diff (should handle gracefully)."""
+        malformed_diff = """This is not a valid diff
+Random text
+More random text"""
+        
+        try:
+            changes = parse_diff_output(malformed_diff)
+            
+            # Should return empty list for malformed input
+            expected = {"file_count": 0}
+            actual = {"file_count": len(changes)}
+            passed = len(changes) == 0
+            
+            reporter.record_result(
+                "parse_malformed_diff",
+                str(expected),
+                str(actual),
+                passed
+            )
+            
+            assert passed
+            
+        except Exception as e:
+            reporter.record_result(
+                "parse_malformed_diff",
+                "Graceful handling of malformed diff",
+                f"Exception raised: {e}",
+                False,
+                e
+            )
+            raise
 
 
 @pytest.fixture(autouse=True)
@@ -893,7 +619,6 @@ def print_test_summary():
     reporter.print_summary()
 
 
-# This allows the tests to be run with: python -m pytest tests/test_python_function_detection.py::test_function_name -v
+# This allows the tests to be run with: python -m pytest tests/test_git_operations.py::test_function_name -v
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-    
