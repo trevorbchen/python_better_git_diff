@@ -1,7 +1,7 @@
 """Enhanced diff parser that includes Python function information."""
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Set
 from pathlib import Path
 
 from diff_parser import FileChange, DiffHunk, parse_diff_output
@@ -77,82 +77,201 @@ class FunctionAwareDiffParser:
             if file_path.exists():
                 file_content = file_path.read_text(encoding='utf-8')
                 enhanced.detected_functions = self.function_detector.detect_functions(file_content)
-                enhanced.function_changes = self._map_hunks_to_functions(change.hunks, enhanced.detected_functions)
+                enhanced.function_changes = self._map_hunks_to_functions(change.hunks, enhanced.detected_functions, file_content)
         except Exception:
             # If we can't read the file or detect functions, just return the basic enhanced change
             pass
         
         return enhanced
     
-    def _map_hunks_to_functions(self, hunks: List[DiffHunk], functions: List[PythonFunction]) -> List[FunctionChange]:
+    def _map_hunks_to_functions(self, hunks: List[DiffHunk], functions: List[PythonFunction], file_content: str) -> List[FunctionChange]:
         """Map diff hunks to the functions they affect."""
         function_changes = []
+        processed_functions = set()  # Track functions we've already processed
+        
+        # Get all changed lines from all hunks
+        all_added_lines = set()
+        all_removed_lines = set()
+        all_modified_lines = set()
         
         for hunk in hunks:
-            affected_lines = self._extract_changed_lines(hunk)
+            added_lines, removed_lines, modified_lines = self._extract_changed_lines_detailed(hunk)
+            all_added_lines.update(added_lines)
+            all_removed_lines.update(removed_lines)
+            all_modified_lines.update(modified_lines)
+        
+        # Check each function against the changes
+        for function in functions:
+            function_key = (function.name, function.class_name, function.start_line)
+            if function_key in processed_functions:
+                continue
             
-            # Find functions that overlap with the changed lines
-            for function in functions:
-                overlapping_lines = [
-                    line for line in affected_lines 
-                    if function.start_line <= line <= function.end_line
-                ]
+            # Check if this function overlaps with any changed lines
+            function_lines = set(range(function.start_line, function.end_line + 1))
+            
+            # Find overlapping lines
+            added_in_function = function_lines.intersection(all_added_lines)
+            removed_in_function = function_lines.intersection(all_removed_lines)
+            modified_in_function = function_lines.intersection(all_modified_lines)
+            
+            all_affected_lines = added_in_function.union(removed_in_function).union(modified_in_function)
+            
+            if all_affected_lines:
+                # Determine the change type
+                change_type = self._determine_change_type_advanced(
+                    function, 
+                    added_in_function, 
+                    removed_in_function, 
+                    modified_in_function,
+                    file_content
+                )
                 
-                if overlapping_lines:
-                    # Determine change type based on the hunk content
-                    change_type = self._determine_change_type(hunk, function)
-                    
+                function_change = FunctionChange(
+                    function=function,
+                    change_type=change_type,
+                    affected_lines=sorted(list(all_affected_lines))
+                )
+                
+                function_changes.append(function_change)
+                processed_functions.add(function_key)
+        
+        # Also check for functions that might be entirely new (added in the diff)
+        # This handles cases where new functions are added
+        for hunk in hunks:
+            new_functions = self._detect_new_functions_in_hunk(hunk, functions)
+            for new_func in new_functions:
+                function_key = (new_func.name, new_func.class_name, new_func.start_line)
+                if function_key not in processed_functions:
                     function_change = FunctionChange(
-                        function=function,
-                        change_type=change_type,
-                        affected_lines=overlapping_lines
+                        function=new_func,
+                        change_type="added",
+                        affected_lines=list(range(new_func.start_line, new_func.end_line + 1))
                     )
-                    
-                    # Avoid duplicates
-                    if function_change not in function_changes:
-                        function_changes.append(function_change)
+                    function_changes.append(function_change)
+                    processed_functions.add(function_key)
         
         return function_changes
     
-    def _extract_changed_lines(self, hunk: DiffHunk) -> List[int]:
-        """Extract the line numbers that were actually changed in a hunk."""
-        changed_lines = []
+    def _extract_changed_lines_detailed(self, hunk: DiffHunk) -> tuple[Set[int], Set[int], Set[int]]:
+        """Extract detailed information about added, removed, and context lines."""
+        added_lines = set()
+        removed_lines = set()  # These are the "old" line numbers that were removed
+        modified_lines = set()  # Context lines that might be affected
+        
         current_new_line = hunk.new_start
+        current_old_line = hunk.old_start
         
         for line in hunk.lines:
             if line.startswith('+'):
                 # Added line
-                changed_lines.append(current_new_line)
+                added_lines.add(current_new_line)
                 current_new_line += 1
             elif line.startswith('-'):
-                # Deleted line - we don't increment new line counter
-                # but we should track this affects the function
-                continue
+                # Removed line (track old line numbers)
+                removed_lines.add(current_old_line)
+                current_old_line += 1
             elif line.startswith(' '):
-                # Context line - increment counter but don't mark as changed
+                # Context line - present in both versions
+                modified_lines.add(current_new_line)
                 current_new_line += 1
+                current_old_line += 1
+            # Handle other line types gracefully
             else:
-                # Other types of lines (like @@), increment conservatively
                 current_new_line += 1
+                current_old_line += 1
         
-        return changed_lines
+        return added_lines, removed_lines, modified_lines
     
-    def _determine_change_type(self, hunk: DiffHunk, function: PythonFunction) -> str:
-        """Determine the type of change affecting a function."""
-        has_additions = any(line.startswith('+') for line in hunk.lines)
-        has_deletions = any(line.startswith('-') for line in hunk.lines)
+    def _determine_change_type_advanced(self, function: PythonFunction, added_lines: Set[int], 
+                                      removed_lines: Set[int], modified_lines: Set[int], 
+                                      file_content: str) -> str:
+        """Determine the type of change affecting a function with more sophisticated logic."""
         
-        # Check if the function declaration itself is being added/removed
-        function_declaration_affected = (
-            hunk.new_start <= function.start_line <= hunk.new_start + hunk.new_count
-        )
+        # Check if the function declaration line is involved
+        function_declaration_line = function.start_line
         
-        if function_declaration_affected and has_additions and not has_deletions:
+        # If the function declaration is in added lines, it's likely a new function
+        if function_declaration_line in added_lines:
             return 'added'
-        elif function_declaration_affected and has_deletions and not has_additions:
+        
+        # If there are removed lines but no added lines in the function, it might be deleted
+        # However, we need to be careful because we're analyzing the "new" version of the file
+        if removed_lines and not added_lines and not modified_lines:
             return 'deleted'
-        else:
+        
+        # If there are both additions and removals, or just additions, it's modified
+        if added_lines or removed_lines:
             return 'modified'
+        
+        # If only context lines are affected, it's still considered modified
+        if modified_lines:
+            return 'modified'
+        
+        # Default to modified if we can't determine
+        return 'modified'
+    
+    def _detect_new_functions_in_hunk(self, hunk: DiffHunk, existing_functions: List[PythonFunction]) -> List[PythonFunction]:
+        """Detect completely new functions that are added in this hunk."""
+        new_functions = []
+        
+        # Look for function definition lines in added content
+        added_content = []
+        current_line = hunk.new_start
+        
+        for line in hunk.lines:
+            if line.startswith('+'):
+                line_content = line[1:]  # Remove the '+' prefix
+                added_content.append((current_line, line_content))
+                current_line += 1
+            elif line.startswith(' '):
+                current_line += 1
+            # Skip removed lines (they don't contribute to new line numbers)
+        
+        # Check if any added lines contain function definitions
+        for line_num, content in added_content:
+            stripped = content.strip()
+            if (stripped.startswith('def ') or stripped.startswith('async def ')) and ':' in stripped:
+                # This looks like a function definition
+                # Check if this line is not already covered by existing functions
+                is_new = True
+                for existing_func in existing_functions:
+                    if existing_func.start_line <= line_num <= existing_func.end_line:
+                        is_new = False
+                        break
+                
+                if is_new:
+                    # Try to extract the function name
+                    try:
+                        if stripped.startswith('async def '):
+                            func_part = stripped[10:]  # Remove 'async def '
+                        else:
+                            func_part = stripped[4:]   # Remove 'def '
+                        
+                        func_name = func_part.split('(')[0].strip()
+                        
+                        # Create a minimal function object for this new function
+                        # We can't determine the exact end line from just the hunk,
+                        # so we'll make a reasonable estimate
+                        estimated_end = line_num + 3  # Conservative estimate
+                        
+                        new_func = PythonFunction(
+                            name=func_name,
+                            start_line=line_num,
+                            end_line=estimated_end,
+                            start_byte=0,
+                            end_byte=0,
+                            class_name=None,  # We'd need more context to determine this
+                            is_method=False,  # Same here
+                            is_async=stripped.startswith('async def '),
+                            decorator_names=[]
+                        )
+                        
+                        new_functions.append(new_func)
+                    except Exception:
+                        # If we can't parse the function name, skip it
+                        pass
+        
+        return new_functions
 
 
 def parse_git_diff_with_functions(diff_text: str, repo_path: str) -> List[EnhancedFileChange]:

@@ -8,7 +8,6 @@ import stat
 from pathlib import Path
 import pytest
 from git import Repo
-import json
 
 # Add the parent directory to the path so we can import our modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -67,7 +66,12 @@ class VerboseTestReporter:
             passed = sum(1 for r in self.results if r.passed)
             total = len(self.results)
             print(f"\n{'='*80}")
-            print(f"TEST SUMMARY: {passed}/{total} PASSED")
+            print(f"GIT OPERATIONS TEST SUMMARY: {passed}/{total} PASSED")
+            if passed < total:
+                print("FAILED TESTS:")
+                for r in self.results:
+                    if not r.passed:
+                        print(f"  - {r.test_name}: {r.error or 'Assertion failed'}")
             print(f"{'='*80}")
 
 

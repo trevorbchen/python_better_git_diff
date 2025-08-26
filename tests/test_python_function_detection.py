@@ -18,7 +18,7 @@ from function_aware_diff import FunctionAwareDiffParser, parse_git_diff_with_fun
 from git_operations import get_commit_diff
 
 
-class TestResult:
+class FunctionTestResult:
     """Helper class to capture and format test results."""
     def __init__(self, test_name, expected, actual, passed, error=None):
         self.test_name = test_name
@@ -44,7 +44,7 @@ class VerboseTestReporter:
         self.results = []
     
     def record_result(self, test_name, expected, actual, passed, error=None):
-        result = TestResult(test_name, expected, actual, passed, error)
+        result = FunctionTestResult(test_name, expected, actual, passed, error)  # Changed here
         self.results.append(result)
         
         if self.verbose:

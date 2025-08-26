@@ -46,52 +46,55 @@ class PythonFunctionDetector:
             return []
         
         functions = []
-        self._traverse_node(tree, file_content.encode(), functions)
+        self._traverse_node(tree, file_content, functions, class_name=None, inside_function=False)
+        
+        # Sort functions by start line for consistency
+        functions.sort(key=lambda f: f.start_line)
         return functions
     
-    def _traverse_node(self, node: ast.AST, source: bytes, functions: List[PythonFunction], class_name: str = None):
+    def _traverse_node(self, node: ast.AST, source: str, functions: List[PythonFunction], 
+                      class_name: str = None, inside_function: bool = False):
         """Recursively traverse AST nodes to find function definitions."""
         
         if isinstance(node, ast.ClassDef):
             # Process class and its methods
             current_class_name = node.name
+            
+            # If we're inside a function, this is a nested class
+            # Nested classes still count as being "in" that class for their methods
             for child in ast.iter_child_nodes(node):
-                self._traverse_node(child, source, functions, current_class_name)
+                self._traverse_node(child, source, functions, current_class_name, inside_function)
         
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # Extract function information
             function = self._extract_function_info(node, source, class_name)
             if function:
                 functions.append(function)
             
-            # Also check for nested functions
+            # For nested functions: they should NOT inherit the class_name
+            # Only direct class members should be considered methods
             for child in ast.iter_child_nodes(node):
-                self._traverse_node(child, source, functions, class_name)
+                self._traverse_node(child, source, functions, class_name=None, inside_function=True)
         
         else:
             # Continue traversing child nodes
             for child in ast.iter_child_nodes(node):
-                self._traverse_node(child, source, functions, class_name)
+                self._traverse_node(child, source, functions, class_name, inside_function)
     
-    def _extract_function_info(self, node: ast.FunctionDef, source: bytes, class_name: str = None) -> Optional[PythonFunction]:
+    def _extract_function_info(self, node: ast.FunctionDef, source: str, class_name: str = None) -> Optional[PythonFunction]:
         """Extract function information from a function definition node."""
         function_name = node.name
         is_async = isinstance(node, ast.AsyncFunctionDef)
         decorators = []
         
-        # Extract decorator names
+        # Extract decorator names with special handling for property patterns
         for decorator in node.decorator_list:
             decorator_name = self._extract_decorator_name(decorator)
             if decorator_name:
                 decorators.append(decorator_name)
         
         start_line = node.lineno
-        end_line = getattr(node, 'end_lineno', start_line)
-        
-        # If end_lineno is not available, estimate based on body
-        if end_line is None or end_line == start_line:
-            if node.body:
-                last_stmt = node.body[-1]
-                end_line = getattr(last_stmt, 'end_lineno', getattr(last_stmt, 'lineno', start_line))
+        end_line = self._calculate_end_line(node, source)
         
         # Check if this is a method (inside a class)
         is_method = class_name is not None
@@ -108,16 +111,71 @@ class PythonFunctionDetector:
             decorator_names=decorators
         )
     
+    def _calculate_end_line(self, node: ast.FunctionDef, source: str) -> int:
+        """Calculate the end line of a function more accurately."""
+        # Try to use end_lineno if available (Python 3.8+)
+        if hasattr(node, 'end_lineno') and node.end_lineno is not None:
+            return node.end_lineno
+        
+        # Fallback: estimate based on the last statement in the function body
+        if node.body:
+            last_stmt = node.body[-1]
+            
+            # Try to get end_lineno from the last statement
+            if hasattr(last_stmt, 'end_lineno') and last_stmt.end_lineno is not None:
+                return last_stmt.end_lineno
+            
+            # Fallback to lineno of last statement
+            if hasattr(last_stmt, 'lineno'):
+                end_line = last_stmt.lineno
+                
+                # For complex statements, try to estimate additional lines
+                if isinstance(last_stmt, (ast.If, ast.For, ast.While, ast.With, ast.Try)):
+                    # These statements likely span multiple lines
+                    end_line += 1
+                elif isinstance(last_stmt, ast.Return) and last_stmt.value:
+                    # Return statements might be multiline
+                    source_lines = source.split('\n')
+                    if end_line <= len(source_lines):
+                        # Check if the return statement continues on next lines
+                        for i in range(end_line, min(end_line + 3, len(source_lines))):
+                            line = source_lines[i - 1].strip()  # -1 because line numbers are 1-based
+                            if line.endswith(')') or line.endswith(']') or line.endswith('}'):
+                                end_line = i
+                                break
+                
+                return end_line
+        
+        # Ultimate fallback: return start line
+        return node.lineno
+    
     def _extract_decorator_name(self, decorator) -> Optional[str]:
-        """Extract decorator name from decorator node."""
+        """Extract decorator name from decorator node with special property handling."""
         if isinstance(decorator, ast.Name):
             return decorator.id
         elif isinstance(decorator, ast.Attribute):
-            return decorator.attr
-        elif isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name):
-            return decorator.func.id
-        elif isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Attribute):
-            return decorator.func.attr
+            # Handle cases like @current_value.setter
+            attr_name = decorator.attr
+            if attr_name == "setter":
+                # This is a property setter - count it as a "property" decorator
+                return "property"
+            elif attr_name == "getter":
+                # This is a property getter - count it as a "property" decorator  
+                return "property"
+            elif attr_name == "deleter":
+                # This is a property deleter - count it as a "property" decorator
+                return "property"
+            else:
+                return attr_name
+        elif isinstance(decorator, ast.Call):
+            # Handle decorator calls like @decorator()
+            if isinstance(decorator.func, ast.Name):
+                return decorator.func.id
+            elif isinstance(decorator.func, ast.Attribute):
+                attr_name = decorator.func.attr
+                if attr_name in ("setter", "getter", "deleter"):
+                    return "property"
+                return attr_name
         return None
     
     def find_functions_at_lines(self, file_content: str, line_numbers: List[int]) -> List[PythonFunction]:
