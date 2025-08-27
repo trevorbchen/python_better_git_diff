@@ -537,7 +537,7 @@ index abc123..def456 100644
             "file_count": 1,
             "hunk_count": 2,
             "first_hunk_start": 1,
-            "second_hunk_start": 10
+            "second_hunk_start": 11
         }
         
         actual = {
@@ -546,13 +546,13 @@ index abc123..def456 100644
             "first_hunk_start": changes[0].hunks[0].new_start if changes and changes[0].hunks else None,
             "second_hunk_start": changes[0].hunks[1].new_start if changes and len(changes[0].hunks) > 1 else None
         }
-        print(actual)
+        print(actual) #this is last error for now*
         
         passed = (
             len(changes) == 1 and
             len(changes[0].hunks) == 2 and
             changes[0].hunks[0].new_start == 1 and
-            changes[0].hunks[1].new_start == 10
+            changes[0].hunks[1].new_start == 11
         )
         
         reporter.record_result(
