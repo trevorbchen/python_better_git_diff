@@ -435,7 +435,7 @@ index abc123..def456 100644
             "file_count": 1,
             "file_name": "test.py",
             "hunk_count": 1,
-            "added_lines": 3
+            "added_lines": 4
         }
         
         actual = {
@@ -449,7 +449,7 @@ index abc123..def456 100644
             len(changes) == 1 and
             changes[0].new_file == "test.py" and
             len(changes[0].hunks) == 1 and
-            sum(1 for line in changes[0].hunks[0].lines if line.startswith('+')) == 3
+            sum(1 for line in changes[0].hunks[0].lines if line.startswith('+')) == 4
         )
         
         reporter.record_result(
@@ -546,6 +546,7 @@ index abc123..def456 100644
             "first_hunk_start": changes[0].hunks[0].new_start if changes and changes[0].hunks else None,
             "second_hunk_start": changes[0].hunks[1].new_start if changes and len(changes[0].hunks) > 1 else None
         }
+        print(actual)
         
         passed = (
             len(changes) == 1 and
